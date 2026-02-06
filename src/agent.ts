@@ -1,197 +1,254 @@
 import OpenAI from 'openai';
-import { Octokit } from '@octokit/rest';
-import axios from 'axios';
 
-interface JiraIssue {
-  key: string;
-  fields: {
-    summary: string;
-    description: string;
-    status: {
-      name: string;
-    };
-    issuetype: {
-      name: string;
-    };
-  };
-}
-
-interface Subtask {
+interface TicketData {
+  id: string;
   title: string;
   description: string;
-  estimatedComplexity: 'low' | 'medium' | 'high';
+  assignee?: string;
+  priority?: string;
+  labels?: string[];
 }
 
-interface CodeChange {
-  filePath: string;
-  content: string;
-  action: 'create' | 'modify' | 'delete';
+interface SubTask {
+  title: string;
+  description: string;
+  estimatedEffort: string;
+}
+
+interface AnalysisResult {
+  summary: string;
+  complexity: 'low' | 'medium' | 'high';
+  subtasks: SubTask[];
+  technicalApproach: string;
+  estimatedTime: string;
+}
+
+interface CodeGenerationResult {
+  files: Array<{
+    path: string;
+    content: string;
+    language: string;
+  }>;
+  testStrategy: string;
+  implementationNotes: string;
 }
 
 export class AIAgent {
   private openai: OpenAI;
-  private octokit: Octokit;
-  private jiraBaseUrl: string;
-  private jiraAuth: string;
 
-  constructor() {
-    // Initialize OpenAI
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-
-    // Initialize GitHub Octokit
-    this.octokit = new Octokit({
-      auth: process.env.GITHUB_TOKEN,
-    });
-
-    // Initialize Jira configuration
-    this.jiraBaseUrl = `https://${process.env.JIRA_HOST}`;
-    this.jiraAuth = Buffer.from(
-      `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-    ).toString('base64');
+  constructor(apiKey: string) {
+    this.openai = new OpenAI({ apiKey });
   }
 
-  /**
-   * Main entry point for processing a ticket
-   */
-  async processTicket(issue: JiraIssue): Promise<void> {
+  async analyzeTicket(ticket: TicketData): Promise<AnalysisResult> {
+    console.log(`Analyzing ticket: ${ticket.id} - ${ticket.title}`);
+
+    const prompt = `You are an expert software engineer analyzing a ticket.
+
+Ticket Details:
+- ID: ${ticket.id}
+- Title: ${ticket.title}
+- Description: ${ticket.description}
+- Priority: ${ticket.priority || 'Not specified'}
+- Labels: ${ticket.labels?.join(', ') || 'None'}
+
+Please analyze this ticket and provide:
+1. A brief summary of what needs to be done
+2. Complexity assessment (low/medium/high)
+3. Break it down into 2-4 subtasks
+4. Technical approach recommendation
+5. Estimated time to complete
+
+Return your response in JSON format with this structure:
+{
+  "summary": "Brief summary",
+  "complexity": "low|medium|high",
+  "subtasks": [
+    {
+      "title": "Subtask title",
+      "description": "What needs to be done",
+      "estimatedEffort": "time estimate"
+    }
+  ],
+  "technicalApproach": "Recommended approach",
+  "estimatedTime": "Total estimated time"
+}`;
+
     try {
-      console.log(`\n🚀 Starting AI agent processing for ${issue.key}`);
-      
-      // Step 1: Analyze the ticket with AI
-      console.log('📊 Step 1: Analyzing ticket...');
-      const analysis = await this.analyzeTicket(issue);
-      console.log('✅ Analysis complete');
+      const response = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an expert software engineer who analyzes tickets and breaks them down into actionable subtasks. Always respond with valid JSON.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.7,
+        max_tokens: 2000
+      });
 
-      // Step 2: Break down into subtasks
-      console.log('📋 Step 2: Breaking down into subtasks...');
-      const subtasks = await this.breakdownIntoSubtasks(issue, analysis);
-      console.log(`✅ Created ${subtasks.length} subtasks`);
-
-      // Step 3: Generate code for each subtask
-      console.log('💻 Step 3: Generating code...');
-      const codeChanges = await this.generateCode(issue, subtasks, analysis);
-      console.log(`✅ Generated ${codeChanges.length} code changes`);
-
-      // Step 4: Create branch and commit changes
-      console.log('🌿 Step 4: Creating branch and committing...');
-      const branchName = await this.createBranchAndCommit(issue, codeChanges);
-      console.log(`✅ Created branch: ${branchName}`);
-
-      // Step 5: Run tests (simulated for now)
-      console.log('🧪 Step 5: Running tests...');
-      const testsPass = await this.runTests(branchName);
-      console.log(`✅ Tests ${testsPass ? 'passed' : 'failed'}`);
-
-      // Step 6: Create pull request
-      if (testsPass) {
-        console.log('📬 Step 6: Creating pull request...');
-        const prUrl = await this.createPullRequest(issue, branchName);
-        console.log(`✅ Pull request created: ${prUrl}`);
-
-        // Update Jira ticket
-        await this.updateJiraTicket(issue.key, prUrl);
-        console.log('✅ Jira ticket updated');
-      } else {
-        console.log('⚠️ Tests failed, skipping PR creation');
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        throw new Error('No response from AI');
       }
 
-      console.log(`\n✨ Processing complete for ${issue.key}\n`);
+      // Parse JSON response
+      const analysis = JSON.parse(content) as AnalysisResult;
+      console.log(`Analysis complete. Complexity: ${analysis.complexity}`);
+      
+      return analysis;
     } catch (error) {
-      console.error(`❌ Error processing ticket ${issue.key}:`, error);
-      throw error;
+      console.error('Error analyzing ticket:', error);
+      throw new Error(`Failed to analyze ticket: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  /**
-   * Analyze the ticket using GPT-4o
-   */
-  private async analyzeTicket(issue: JiraIssue): Promise<string> {
-    const prompt = `
-Analyze this software development ticket and provide a detailed technical analysis:
+  async generateCode(ticket: TicketData, analysis: AnalysisResult): Promise<CodeGenerationResult> {
+    console.log(`Generating code for ticket: ${ticket.id}`);
 
-Ticket: ${issue.key}
-Title: ${issue.fields.summary}
-Description: ${issue.fields.description || 'No description provided'}
-Type: ${issue.fields.issuetype.name}
+    const prompt = `You are an expert software engineer. Generate code to implement this ticket.
 
-Please provide:
-1. Technical requirements
-2. Potential challenges
-3. Recommended approach
-4. Dependencies and integrations needed
-5. Estimated complexity (low/medium/high)
-`;
-
-    const response = await this.openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'system',
-          content: 'You are an expert software architect analyzing development tickets.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      temperature: 0.7,
-      max_tokens: 2000,
-    });
-
-    return response.choices[0].message.content || '';
-  }
-
-  /**
-   * Break down the ticket into subtasks
-   */
-  private async breakdownIntoSubtasks(
-    issue: JiraIssue,
-    analysis: string
-  ): Promise<Subtask[]> {
-    const prompt = `
-Based on this ticket and analysis, break it down into specific, actionable subtasks:
-
-Ticket: ${issue.key}
-Title: ${issue.fields.summary}
-Description: ${issue.fields.description || 'No description provided'}
+Ticket: ${ticket.title}
+Description: ${ticket.description}
 
 Analysis:
-${analysis}
+${JSON.stringify(analysis, null, 2)}
 
-Create 3-7 subtasks. For each subtask, provide:
-1. A clear, specific title
-2. Detailed description of what needs to be done
-3. Estimated complexity (low/medium/high)
+Generate the necessary code files to implement this feature. Include:
+1. All required source files with complete, production-ready code
+2. Test files if applicable
+3. Any configuration changes needed
 
-Format as JSON array:
-[
-  {
-    "title": "Subtask title",
-    "description": "Detailed description",
-    "estimatedComplexity": "low"
+Return your response in JSON format:
+{
+  "files": [
+    {
+      "path": "relative/path/to/file.ts",
+      "content": "complete file content",
+      "language": "typescript"
+    }
+  ],
+  "testStrategy": "How to test this implementation",
+  "implementationNotes": "Important notes about the implementation"
+}
+
+Make sure all code is complete, follows best practices, and includes proper error handling.`;
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an expert software engineer who writes clean, production-ready code. Always respond with valid JSON containing complete file contents.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 4000
+      });
+
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        throw new Error('No response from AI');
+      }
+
+      const codeResult = JSON.parse(content) as CodeGenerationResult;
+      console.log(`Generated ${codeResult.files.length} files`);
+      
+      return codeResult;
+    } catch (error) {
+      console.error('Error generating code:', error);
+      throw new Error(`Failed to generate code: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
-]
-`;
 
-    const response = await this.openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'system',
-          content: 'You are an expert at breaking down software tasks. Always respond with valid JSON.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      temperature: 0.5,
-      max_tokens: 2000,
-    });
+  async processTicket(ticket: TicketData): Promise<{
+    analysis: AnalysisResult;
+    code: CodeGenerationResult;
+  }> {
+    console.log(`Processing ticket: ${ticket.id}`);
 
-    const content = response.choices[0].message.content || '[]';
-    
-    // Extract JSON from markdown code blocks if present
-    const jsonMatch = content.match(/
+    // Step 1: Analyze the ticket
+    const analysis = await this.analyzeTicket(ticket);
+
+    // Step 2: Generate code based on analysis
+    const code = await this.generateCode(ticket, analysis);
+
+    console.log(`Ticket ${ticket.id} processed successfully`);
+
+    return {
+      analysis,
+      code
+    };
+  }
+
+  async reviewCode(code: string, context: string): Promise<{
+    approved: boolean;
+    issues: string[];
+    suggestions: string[];
+  }> {
+    console.log('Reviewing generated code...');
+
+    const prompt = `You are a senior software engineer reviewing code.
+
+Context: ${context}
+
+Code to review:
+\`\`\`
+${code}
+\`\`\`
+
+Review this code for:
+1. Correctness and functionality
+2. Best practices and code quality
+3. Security issues
+4. Performance concerns
+5. Test coverage
+
+Return your review in JSON format:
+{
+  "approved": true/false,
+  "issues": ["list of critical issues that must be fixed"],
+  "suggestions": ["list of improvement suggestions"]
+}`;
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a senior software engineer conducting thorough code reviews. Always respond with valid JSON.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 1500
+      });
+
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        throw new Error('No response from AI');
+      }
+
+      const review = JSON.parse(content);
+      console.log(`Code review complete. Approved: ${review.approved}`);
+      
+      return review;
+    } catch (error) {
+      console.error('Error reviewing code:', error);
+      throw new Error(`Failed to review code: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+}
