@@ -1,24 +1,18 @@
-import express from 'express';
-import bodyParser from 'body-parser';
-import dotenv from 'dotenv';
-import { webhookHandler } from './webhook';
+import { startWebhookServer } from './webhook';
+import { AIAgent } from './agent';
 
-dotenv.config();
+// Get configuration from environment variables
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+if (!OPENAI_API_KEY) {
+  console.error('Error: OPENAI_API_KEY environment variable is required');
+  process.exit(1);
+}
 
-app.use(bodyParser.json());
+// Start the webhook server
+console.log('Starting AI Software Engineer Agent...');
+startWebhookServer(OPENAI_API_KEY, PORT);
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Webhook endpoint for Jira
-app.post('/webhook/jira', webhookHandler);
-
-app.listen(PORT, () => {
-  console.log(`🤖 AI Software Engineer Agent running on port ${PORT}`);
-  console.log(`Webhook endpoint: http://localhost:${PORT}/webhook/jira`);
-});
+// Export for programmatic use
+export { AIAgent, startWebhookServer };
