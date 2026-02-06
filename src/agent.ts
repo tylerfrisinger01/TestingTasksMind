@@ -1,14 +1,19 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { Octokit } from '@octokit/rest';
 import axios from 'axios';
 
-interface Ticket {
-  id: string;
+interface JiraIssue {
   key: string;
-  summary: string;
-  description: string;
-  assignee?: string;
-  status: string;
+  fields: {
+    summary: string;
+    description: string;
+    status: {
+      name: string;
+    };
+    issuetype: {
+      name: string;
+    };
+  };
 }
 
 interface Subtask {
@@ -18,264 +23,175 @@ interface Subtask {
 }
 
 interface CodeChange {
-  path: string;
+  filePath: string;
   content: string;
   action: 'create' | 'modify' | 'delete';
 }
 
-interface AgentConfig {
-  anthropicApiKey: string;
-  githubToken: string;
-  jiraUrl: string;
-  jiraEmail: string;
-  jiraApiToken: string;
-  githubOwner: string;
-  githubRepo: string;
-  defaultBranch: string;
-}
-
 export class AIAgent {
-  private anthropic: Anthropic;
+  private openai: OpenAI;
   private octokit: Octokit;
-  private config: AgentConfig;
+  private jiraBaseUrl: string;
+  private jiraAuth: string;
 
-  constructor(config: AgentConfig) {
-    this.config = config;
-    this.anthropic = new Anthropic({
-      apiKey: config.anthropicApiKey,
+  constructor() {
+    // Initialize OpenAI
+    this.openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
     });
+
+    // Initialize GitHub Octokit
     this.octokit = new Octokit({
-      auth: config.githubToken,
+      auth: process.env.GITHUB_TOKEN,
     });
+
+    // Initialize Jira configuration
+    this.jiraBaseUrl = `https://${process.env.JIRA_HOST}`;
+    this.jiraAuth = Buffer.from(
+      `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+    ).toString('base64');
   }
 
   /**
-   * Main entry point - processes a ticket end-to-end
+   * Main entry point for processing a ticket
    */
-  async processTicket(ticket: Ticket): Promise<string> {
+  async processTicket(issue: JiraIssue): Promise<void> {
     try {
-      console.log(`🤖 Processing ticket: ${ticket.key} - ${ticket.summary}`);
-
-      // Step 1: Analyze the ticket
-      const analysis = await this.analyzeTicket(ticket);
-      console.log('✅ Ticket analyzed');
+      console.log(`\n🚀 Starting AI agent processing for ${issue.key}`);
+      
+      // Step 1: Analyze the ticket with AI
+      console.log('📊 Step 1: Analyzing ticket...');
+      const analysis = await this.analyzeTicket(issue);
+      console.log('✅ Analysis complete');
 
       // Step 2: Break down into subtasks
-      const subtasks = await this.breakdownIntoSubtasks(ticket, analysis);
+      console.log('📋 Step 2: Breaking down into subtasks...');
+      const subtasks = await this.breakdownIntoSubtasks(issue, analysis);
       console.log(`✅ Created ${subtasks.length} subtasks`);
 
-      // Step 3: Get repository context
-      const repoContext = await this.getRepositoryContext();
-      console.log('✅ Repository context gathered');
-
-      // Step 4: Generate code changes
-      const codeChanges = await this.generateCode(ticket, subtasks, repoContext);
+      // Step 3: Generate code for each subtask
+      console.log('💻 Step 3: Generating code...');
+      const codeChanges = await this.generateCode(issue, subtasks, analysis);
       console.log(`✅ Generated ${codeChanges.length} code changes`);
 
-      // Step 5: Create branch and commit changes
-      const branchName = await this.createBranchAndCommit(ticket, codeChanges);
+      // Step 4: Create branch and commit changes
+      console.log('🌿 Step 4: Creating branch and committing...');
+      const branchName = await this.createBranchAndCommit(issue, codeChanges);
       console.log(`✅ Created branch: ${branchName}`);
 
-      // Step 6: Run tests (simulated for now)
+      // Step 5: Run tests (simulated for now)
+      console.log('🧪 Step 5: Running tests...');
       const testsPass = await this.runTests(branchName);
       console.log(`✅ Tests ${testsPass ? 'passed' : 'failed'}`);
 
-      // Step 7: Create pull request
-      const prUrl = await this.createPullRequest(ticket, branchName, subtasks);
-      console.log(`✅ Pull request created: ${prUrl}`);
+      // Step 6: Create pull request
+      if (testsPass) {
+        console.log('📬 Step 6: Creating pull request...');
+        const prUrl = await this.createPullRequest(issue, branchName);
+        console.log(`✅ Pull request created: ${prUrl}`);
 
-      // Step 8: Update Jira ticket
-      await this.updateJiraTicket(ticket.key, prUrl);
-      console.log('✅ Jira ticket updated');
+        // Update Jira ticket
+        await this.updateJiraTicket(issue.key, prUrl);
+        console.log('✅ Jira ticket updated');
+      } else {
+        console.log('⚠️ Tests failed, skipping PR creation');
+      }
 
-      return prUrl;
+      console.log(`\n✨ Processing complete for ${issue.key}\n`);
     } catch (error) {
-      console.error('❌ Error processing ticket:', error);
+      console.error(`❌ Error processing ticket ${issue.key}:`, error);
       throw error;
     }
   }
 
   /**
-   * Analyzes the ticket using Claude AI
+   * Analyze the ticket using GPT-4o
    */
-  private async analyzeTicket(ticket: Ticket): Promise<string> {
-    const prompt = `Analyze this software development ticket and provide a technical analysis:
+  private async analyzeTicket(issue: JiraIssue): Promise<string> {
+    const prompt = `
+Analyze this software development ticket and provide a detailed technical analysis:
 
-Ticket: ${ticket.key}
-Summary: ${ticket.summary}
-Description: ${ticket.description}
+Ticket: ${issue.key}
+Title: ${issue.fields.summary}
+Description: ${issue.fields.description || 'No description provided'}
+Type: ${issue.fields.issuetype.name}
 
 Please provide:
 1. Technical requirements
 2. Potential challenges
 3. Recommended approach
-4. Files that likely need changes
-5. Testing considerations`;
+4. Dependencies and integrations needed
+5. Estimated complexity (low/medium/high)
+`;
 
-    const message = await this.anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
-      max_tokens: 4096,
+    const response = await this.openai.chat.completions.create({
+      model: 'gpt-4o',
       messages: [
+        {
+          role: 'system',
+          content: 'You are an expert software architect analyzing development tickets.',
+        },
         {
           role: 'user',
           content: prompt,
         },
       ],
+      temperature: 0.7,
+      max_tokens: 2000,
     });
 
-    const content = message.content[0];
-    return content.type === 'text' ? content.text : '';
+    return response.choices[0].message.content || '';
   }
 
   /**
-   * Breaks down the ticket into actionable subtasks
+   * Break down the ticket into subtasks
    */
   private async breakdownIntoSubtasks(
-    ticket: Ticket,
+    issue: JiraIssue,
     analysis: string
   ): Promise<Subtask[]> {
-    const prompt = `Based on this ticket and analysis, break it down into specific subtasks:
+    const prompt = `
+Based on this ticket and analysis, break it down into specific, actionable subtasks:
 
-Ticket: ${ticket.key}
-Summary: ${ticket.summary}
-Description: ${ticket.description}
+Ticket: ${issue.key}
+Title: ${issue.fields.summary}
+Description: ${issue.fields.description || 'No description provided'}
 
 Analysis:
 ${analysis}
 
-Create 3-7 specific, actionable subtasks. Return as JSON array with format:
+Create 3-7 subtasks. For each subtask, provide:
+1. A clear, specific title
+2. Detailed description of what needs to be done
+3. Estimated complexity (low/medium/high)
+
+Format as JSON array:
 [
   {
     "title": "Subtask title",
     "description": "Detailed description",
-    "estimatedComplexity": "low|medium|high"
+    "estimatedComplexity": "low"
   }
-]`;
+]
+`;
 
-    const message = await this.anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
-      max_tokens: 2048,
+    const response = await this.openai.chat.completions.create({
+      model: 'gpt-4o',
       messages: [
+        {
+          role: 'system',
+          content: 'You are an expert at breaking down software tasks. Always respond with valid JSON.',
+        },
         {
           role: 'user',
           content: prompt,
         },
       ],
+      temperature: 0.5,
+      max_tokens: 2000,
     });
 
-    const content = message.content[0];
-    const responseText = content.type === 'text' ? content.text : '';
-
-    // Extract JSON from response
-    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
-
-    // Fallback subtasks
-    return [
-      {
-        title: 'Implement core functionality',
-        description: ticket.description,
-        estimatedComplexity: 'medium',
-      },
-    ];
-  }
-
-  /**
-   * Gets repository context (file structure, key files)
-   */
-  private async getRepositoryContext(): Promise<string> {
-    try {
-      // Get repository tree
-      const { data: tree } = await this.octokit.git.getTree({
-        owner: this.config.githubOwner,
-        repo: this.config.githubRepo,
-        tree_sha: this.config.defaultBranch,
-        recursive: 'true',
-      });
-
-      // Filter to important files
-      const importantFiles = tree.tree
-        .filter(
-          (item) =>
-            item.type === 'blob' &&
-            (item.path?.endsWith('.ts') ||
-              item.path?.endsWith('.js') ||
-              item.path?.endsWith('.tsx') ||
-              item.path?.endsWith('.jsx') ||
-              item.path?.includes('package.json') ||
-              item.path?.includes('README'))
-        )
-        .slice(0, 50)
-        .map((item) => item.path);
-
-      return `Repository structure:\n${importantFiles.join('\n')}`;
-    } catch (error) {
-      console.error('Error getting repository context:', error);
-      return 'Repository context unavailable';
-    }
-  }
-
-  /**
-   * Generates code changes using Claude AI
-   */
-  private async generateCode(
-    ticket: Ticket,
-    subtasks: Subtask[],
-    repoContext: string
-  ): Promise<CodeChange[]> {
-    const prompt = `You are an expert software engineer. Generate code changes to implement this ticket:
-
-Ticket: ${ticket.key}
-Summary: ${ticket.summary}
-Description: ${ticket.description}
-
-Subtasks:
-${subtasks.map((st, i) => `${i + 1}. ${st.title}: ${st.description}`).join('\n')}
-
-Repository Context:
-${repoContext}
-
-IMPORTANT: Return files using this EXACT format (no JSON):
-
-### FILE: path/to/file1.ts
-\`\`\`
-// Complete file content here
-export function example() {
-  return "hello";
-}
-\`\`\`
-
-### FILE: path/to/file2.ts
-\`\`\`
-// Complete file content here
-import { example } from './file1';
-\`\`\`
-
-Use exactly "### FILE: " followed by the path, then the code in triple backticks.
-Generate complete, production-ready code with proper error handling and types.`;
-
-    const message = await this.anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
-      max_tokens: 8000,
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-    });
-
-    const content = message.content[0];
-    const responseText = content.type === 'text' ? content.text : '';
-
-    return this.parseCodeChanges(responseText);
-  }
-
-  /**
-   * Parses code changes from AI response
-   */
-  private parseCodeChanges(response: string): CodeChange[] {
-    const changes: CodeChange[] = [];
-    const fileRegex = /### FILE: (.+?)\n
+    const content = response.choices[0].message.content || '[]';
+    
+    // Extract JSON from markdown code blocks if present
+    const jsonMatch = content.match(/
